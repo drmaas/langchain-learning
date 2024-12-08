@@ -15,4 +15,6 @@ dependencies = [
     "requests>=2.32.3",
     "langchainhub>=0.1.21",
     "langchain-google-genai>=2.0.6",
+    "ipython>=8.30.0",
+    "langchain-chroma>=0.1.4",
 ]

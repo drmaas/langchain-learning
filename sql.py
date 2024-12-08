@@ -2,9 +2,12 @@ from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.tools.sql_database.tool import QuerySQLDataBaseTool
+from langgraph.graph import START, StateGraph
+from langgraph.checkpoint.memory import MemorySaver
 
 # note: Gemini blows up when using TypedDict from the typing library
 from pydantic import BaseModel, Field
+from typing import Optional
 
 from langchain_community.utilities import SQLDatabase
 
@@ -12,14 +15,14 @@ import asyncio
 import os
 
 class State(BaseModel):
-    question: str = Field(..., content="question")
-    query: str = Field(..., content="query")
-    result: str = Field(..., content="result")
-    answer: str = Field(..., content="answer")
+    question: str = Field(default=None, content="question")
+    query: str = Field(default=None, content="query")
+    result: str = Field(default=None, content="result")
+    answer: str = Field(default=None, content="answer")
 
 class QueryOutput(BaseModel):
     """Generated SQL query."""
-    query: str = Field(..., content="Syntactically valid SQL query.")   
+    query: str = Field(default=None, content="Syntactically valid SQL query.")   
 
 def createModel():
     # llm = HuggingFaceEndpoint(
@@ -83,7 +86,7 @@ def write_query(state: State):
             "dialect": db.dialect,
             "top_k": 10,
             "table_info": db.get_table_info(),
-            "input": state["question"],
+            "input": state.question,
         }
     )
     print(prompt)
@@ -94,16 +97,16 @@ def write_query(state: State):
 def execute_query(state: State):
     """Execute SQL query."""
     execute_query_tool = QuerySQLDataBaseTool(db=db)
-    return {"result": execute_query_tool.invoke(state["query"])}
+    return {"result": execute_query_tool.invoke(state.query)}
 
 def generate_answer(state: State):
     """Answer question using retrieved information as context."""
     prompt = (
         "Given the following user question, corresponding SQL query, "
         "and SQL result, answer the user question.\n\n"
-        f'Question: {state["question"]}\n'
-        f'SQL Query: {state["query"]}\n'
-        f'SQL Result: {state["result"]}'
+        f'Question: {state.question}\n'
+        f'SQL Query: {state.query}\n'
+        f'SQL Result: {state.result}'
     )
     response = llm.invoke(prompt)
     return {"answer": response.content}
@@ -118,12 +121,41 @@ async def sql_chain():
     print(answer["answer"])
 
 async def sql_graph():
-    pass
+    graph_builder = StateGraph(State).add_sequence(
+        [write_query, execute_query, generate_answer]
+    )
+    graph_builder.add_edge(START, "write_query")
+    memory = MemorySaver()
+    graph = graph_builder.compile(checkpointer=memory, interrupt_before=["execute_query"])
+
+    # Now that we're using persistence, we need to specify a thread ID
+    # so that we can continue the run after review.
+    config = {"configurable": {"thread_id": "1"}}    
+    
+    for step in graph.stream(
+        {"question": "How many employees are there?"}, 
+        config,
+        stream_mode="updates",
+    ):
+        print(step)
+        
+    try:
+        user_approval = input("Do you want to go to execute query? (yes/no): ")
+    except Exception:
+        user_approval = "no"
+
+    if user_approval.lower() == "yes":
+        # If approved, continue the graph execution
+        for step in graph.stream(None, config, stream_mode="updates"):
+            print(step)
+    else:
+        print("Operation cancelled by user.")    
 
 async def main():
     print("Hello from langchain-learning!")
         
-    await sql_chain()
+    # await sql_chain()
+    await sql_graph()
 
 if __name__ == "__main__":
     asyncio.run(main())
